@@ -2782,6 +2782,14 @@
     #define configENABLE_HEAP_PROTECTOR    0
 #endif
 
+#ifndef configVALIDATE_HEAP_BLOCK_POINTER
+    #define configVALIDATE_HEAP_BLOCK_POINTER     0
+#endif
+
+#if ( ( configENABLE_HEAP_PROTECTOR == 0 ) && ( configVALIDATE_HEAP_BLOCK_POINTER == 1 ) )
+    #error configENABLE_HEAP_PROTECTOR must be set to 1 to use customized heap block pointers detection.
+#endif
+
 #ifndef configUSE_TASK_NOTIFICATIONS
     #define configUSE_TASK_NOTIFICATIONS    1
 #endif
