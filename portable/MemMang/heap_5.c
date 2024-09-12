@@ -130,11 +130,7 @@
     #define heapPROTECT_BLOCK_POINTER( pxBlock )    ( ( BlockLink_t * ) ( ( ( portPOINTER_SIZE_TYPE ) ( pxBlock ) ) ^ xHeapCanary ) )
 
 /* Assert that a heap block pointer is within the heap bounds. */
-    #define heapVALIDATE_BLOCK_POINTER( pxBlock )                       \
-    configASSERT( ( pucHeapHighAddress != NULL ) &&                     \
-                  ( pucHeapLowAddress != NULL ) &&                      \
-                  ( ( uint8_t * ) ( pxBlock ) >= pucHeapLowAddress ) && \
-                  ( ( uint8_t * ) ( pxBlock ) < pucHeapHighAddress ) )
+    #define heapVALIDATE_BLOCK_POINTER( pxBlock ) prvValidateBlockPointer( pxBlock )
 
 #else /* if ( configENABLE_HEAP_PROTECTOR == 1 ) */
 
@@ -197,10 +193,19 @@ PRIVILEGED_DATA static size_t xNumberOfSuccessfulFrees = ( size_t ) 0U;
 /* Canary value for protecting internal heap pointers. */
     PRIVILEGED_DATA static portPOINTER_SIZE_TYPE xHeapCanary;
 
-/* Highest and lowest heap addresses used for heap block bounds checking. */
-    PRIVILEGED_DATA static uint8_t * pucHeapHighAddress = NULL;
-    PRIVILEGED_DATA static uint8_t * pucHeapLowAddress = NULL;
+/* Recoard  the number of heap regions. */
+    PRIVILEGED_DATA static BaseType_t xTotalRegionNum = 0;
 
+/* Record the boundaries of a heap region. */
+    typedef struct A_REGION_BOUND
+    {
+        uint8_t * pucHeapLowAddress;  /**< Highest address of a heap region. */
+        uint8_t * pucHeapHighAddress; /**< Lowest address of a heap region. */
+    } Region_Bound_t;
+
+    PRIVILEGED_DATA static Region_Bound_t * pxHeapRegionBound = NULL;
+
+    static void prvValidateBlockPointer( BlockLink_t * pxBlock ) PRIVILEGED_FUNCTION;
 #endif /* configENABLE_HEAP_PROTECTOR */
 
 /*-----------------------------------------------------------*/
@@ -537,6 +542,38 @@ static void prvInsertBlockIntoFreeList( BlockLink_t * pxBlockToInsert ) /* PRIVI
 }
 /*-----------------------------------------------------------*/
 
+#if ( configENABLE_HEAP_PROTECTOR == 1 )
+static void prvValidateBlockPointer( BlockLink_t * pxBlock ) /* PRIVILEGED_FUNCTION */
+{
+    BaseType_t xResult = pdFALSE;
+
+    if ( pxHeapRegionBound != NULL )
+    {
+        /* Traverse all heap regions. */
+        for ( BaseType_t x = 0; x < xTotalRegionNum; x++ )
+        {
+            xResult = ( ( pxHeapRegionBound[x].pucHeapHighAddress != NULL ) &&
+                        ( pxHeapRegionBound[x].pucHeapLowAddress != NULL )  &&
+                        ( ( uint8_t * ) ( pxBlock ) >= pxHeapRegionBound[x].pucHeapLowAddress ) &&
+                        ( ( uint8_t * ) ( pxBlock ) <= pxHeapRegionBound[x].pucHeapHighAddress ) );
+
+            if ( xResult == pdTRUE )
+            {
+                /* The pointer is within one heap region. */
+                break;
+            }
+            else
+            {
+                mtCOVERAGE_TEST_MARKER();
+            }
+        }
+
+        /* Assert that a heap block pointer is not within any heap boundary. */
+        configASSERT( xResult );
+    }
+}
+/*-----------------------------------------------------------*/
+#endif /* configENABLE_HEAP_PROTECTOR */
 void vPortDefineHeapRegions( const HeapRegion_t * const pxHeapRegions ) /* PRIVILEGED_FUNCTION */
 {
     BlockLink_t * pxFirstFreeBlockInRegion = NULL;
@@ -594,15 +631,6 @@ void vPortDefineHeapRegions( const HeapRegion_t * const pxHeapRegions ) /* PRIVI
             configASSERT( ( size_t ) xAddress > ( size_t ) pxEnd );
         }
 
-        #if ( configENABLE_HEAP_PROTECTOR == 1 )
-        {
-            if( ( pucHeapLowAddress == NULL ) ||
-                ( ( uint8_t * ) xAlignedHeap < pucHeapLowAddress ) )
-            {
-                pucHeapLowAddress = ( uint8_t * ) xAlignedHeap;
-            }
-        }
-        #endif /* configENABLE_HEAP_PROTECTOR */
 
         /* Remember the location of the end marker in the previous region, if
          * any. */
@@ -633,16 +661,6 @@ void vPortDefineHeapRegions( const HeapRegion_t * const pxHeapRegions ) /* PRIVI
 
         xTotalHeapSize += pxFirstFreeBlockInRegion->xBlockSize;
 
-        #if ( configENABLE_HEAP_PROTECTOR == 1 )
-        {
-            if( ( pucHeapHighAddress == NULL ) ||
-                ( ( ( ( uint8_t * ) pxFirstFreeBlockInRegion ) + pxFirstFreeBlockInRegion->xBlockSize ) > pucHeapHighAddress ) )
-            {
-                pucHeapHighAddress = ( ( uint8_t * ) pxFirstFreeBlockInRegion ) + pxFirstFreeBlockInRegion->xBlockSize;
-            }
-        }
-        #endif
-
         /* Move onto the next HeapRegion_t structure. */
         xDefinedRegions++;
         pxHeapRegion = &( pxHeapRegions[ xDefinedRegions ] );
@@ -653,6 +671,31 @@ void vPortDefineHeapRegions( const HeapRegion_t * const pxHeapRegions ) /* PRIVI
 
     /* Check something was actually defined before it is accessed. */
     configASSERT( xTotalHeapSize );
+
+    #if ( configENABLE_HEAP_PROTECTOR == 1 )
+    {
+        xTotalRegionNum = xDefinedRegions;
+        /* Allocate buffter to record the boundaries of heap regions. */
+        pxHeapRegionBound = ( Region_Bound_t * ) pvPortMalloc( sizeof( Region_Bound_t ) * xDefinedRegions );
+        BlockLink_t * pxBlock = NULL;
+        BlockLink_t * pxFakeEnd = &xStart;
+
+        for ( BaseType_t x = 0; x < xTotalRegionNum; x++ )
+        {
+            /* The only free block of each heap region. */
+            pxBlock = heapPROTECT_BLOCK_POINTER( pxFakeEnd->pxNextFreeBlock );
+            /* pxFakeEnd is a mark heap block structure at the end of each heap region. */
+            pxFakeEnd = heapPROTECT_BLOCK_POINTER( pxBlock->pxNextFreeBlock );
+            configASSERT( pxFakeEnd->xBlockSize == 0 );
+            xAddress = ( portPOINTER_SIZE_TYPE ) pxBlock;
+            pxHeapRegionBound[x].pucHeapLowAddress = ( uint8_t * ) pxBlock;
+            pxHeapRegionBound[x].pucHeapHighAddress = ( uint8_t * ) ( ( portPOINTER_SIZE_TYPE ) pxBlock->xBlockSize + xAddress );
+        }
+
+        /* After initialise the region boundary structure, pxFakeEnd points to pxEnd. */
+        configASSERT( pxFakeEnd == pxEnd );
+    }
+    #endif /* configENABLE_HEAP_PROTECTOR */
 }
 /*-----------------------------------------------------------*/
 
@@ -729,8 +772,8 @@ void vPortHeapResetState( void )
     xNumberOfSuccessfulFrees = ( size_t ) 0U;
 
     #if ( configENABLE_HEAP_PROTECTOR == 1 )
-        pucHeapHighAddress = NULL;
-        pucHeapLowAddress = NULL;
+        xTotalRegionNum = 0;
+        pxHeapRegionBound = NULL;
     #endif /* #if ( configENABLE_HEAP_PROTECTOR == 1 ) */
 }
 /*-----------------------------------------------------------*/
